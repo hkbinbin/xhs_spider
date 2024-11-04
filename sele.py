@@ -9,10 +9,88 @@ import base64
 from PIL import Image
 from io import BytesIO
 import matplotlib.pyplot as plt
+# database
+import sqlite3
+
+def log_text(text):
+    print(f"\033[1;32m[*] {text}\033[0m\n")
+
+
+def log_hex(value):
+    print(f"\033[1;33m[+] 0x{value}\033[0m\n")
+
+
+def log_error(text):
+    print(f"\033[1;31m[x] {text}\033[0m\n")
+
 
 # 创建 WebDriver
-service = Service(executable_path="/home/hkbin/.cargo/bin/geckodriver")  # 替换为 geckodriver 的路径
-driver = webdriver.Firefox(service=service)
+service = Service(executable_path="/snap/bin/geckodriver")  # !替换为 geckodriver 的路径
+
+options = Options()
+
+ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0'
+options.set_preference('general.useragent.override', ua)
+options.add_argument("--headless")
+
+driver = webdriver.Firefox(service=service, options=options)
+
+file = open("log.txt", "w")
+
+def connect_database():
+    # create database
+    conn = sqlite3.connect('xhs.db')  # 'example.db' 是数据库文件名
+    return conn
+
+def create_table(conn):
+    cursor = conn.cursor()
+    # create table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_keywords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            xhs_id TEXT NOT NULL UNIQUE,
+            ip TEXT NOT NULL,
+            intro TEXT NOT NULL,
+            key_words TEXT NOT NULL
+        )
+    ''')
+
+    conn.commit()
+
+
+def insert_data(conn, username, xhs_id, ip, intro, key_words):
+    cursor = conn.cursor()
+    
+    # Check if user exists
+    cursor.execute('SELECT key_words FROM user_keywords WHERE xhs_id = ?', (xhs_id,))
+    user = cursor.fetchone()
+
+    if user:
+        # 如果用户存在，先获取当前的 key_words
+        existing_key_words = user[0]  # 提取现有的 key_words
+
+        updated_key_words = existing_key_words + key_words
+
+        # 更新用户数据
+        cursor.execute('''
+            UPDATE user_keywords
+            SET username = ?, ip = ?, key_words = ?
+            WHERE xhs_id = ?
+        ''', (username, ip, updated_key_words, xhs_id))
+    else:
+        # 用户不存在，插入新用户
+        cursor.execute('''
+            INSERT INTO user_keywords (username, xhs_id, ip, intro, key_words)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (username, xhs_id, ip, intro, key_words))
+
+    conn.commit()
+
+
+def log_write(text):
+    file.write(text)
+    file.flush()
 
 def login():
 # 打开页面
@@ -37,27 +115,46 @@ def login():
     except Exception as e:
         print("未找到二维码元素:", e)
 
-def spider_user(profile_id): # 5f7050f4000000000100664c
+def spider_user(profile_id, conn): # 5f7050f4000000000100664c
+    user_data = [] # * for database
     url = 'https://www.xiaohongshu.com/user/profile/' + profile_id
     driver.get(url)
     # try roll
     try:
-        time.sleep(0.5)
+        # *get username & id & ip
+        username = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "user-name"))
+        ).text
+        log_text("username: " + username)
+        user_data.append(username)
 
-        scroll_pause_time = 0.5  # 每次滚动后等待的时间
+        xhs_id = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "user-redId"))
+        ).text
+        log_text("userid: " + xhs_id)
+        user_data.append(xhs_id)
+
+        ip = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "user-IP"))
+        ).text
+        log_text("ip: " + ip)
+        user_data.append(ip)
+
+        # *get intro
+        intro = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "user-desc"))
+        ).text
+        log_text("intro: " + intro)
+        user_data.append(intro)
+
+        # conn, username, xhs_id, ip, intro, key_words
+        insert_data(conn, username, xhs_id, ip, intro, "") # ! init a user
+
+        scroll_pause_time = 0.3  # 每次滚动后等待的时间
         last_height = driver.execute_script("return document.body.scrollHeight")
 
         hrefs = set()
         while True:
-            # 向下滚动
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            # 等待页面加载
-            time.sleep(scroll_pause_time)
-            # 计算新的高度并与旧高度进行比较
-            new_height = driver.execute_script("return document.body.scrollHeight")
-            if new_height == last_height:
-                break
-            last_height = new_height
             elements = WebDriverWait(driver, 1).until(
                 lambda d: d.find_elements(By.CSS_SELECTOR, ".cover.ld.mask")
             )
@@ -67,17 +164,77 @@ def spider_user(profile_id): # 5f7050f4000000000100664c
                 href = element.get_attribute('href')
                 print(f"href: {href}")
                 hrefs.add(href)
-        
+            # 向下滚动
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            # 等待页面加载
+            time.sleep(scroll_pause_time)
+            # 计算新的高度并与旧高度进行比较
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:
+                break
+            last_height = new_height        
         print(len(hrefs))
+
+        return hrefs, user_data
         # for href_url in iter(hrefs):
         #     print(href_url)
     except Exception as e:
         print("spider_user error: ", e)
 
-def main():
-    login()
-    spider_user("5f7050f4000000000100664c")
+def get_post(i, url, dic):
+    driver.get(url)
+    log_text("note order: " + str(i))
+    # ?get all
+    # *get title first
+    title = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "title"))
+    ).text
+    log_text("Get title: " + title)
+    log_write("---Title: " + title + "\n")
+    # *get note-text
+    note_text = driver.find_element(By.CSS_SELECTOR, ".note-text span").text
+    log_text("note:"+ note_text)
+    log_write("-----note: " + note_text + "\n")
+    # *get tag
+    wtags = ""
+    tags = driver.find_elements(By.CSS_SELECTOR, "a.tag")
+    for tag in tags:
+        log_text("Tag: "+ tag.text)
+        wtags += tag.text + " "
+        # judge if has keys
+        if(dic.get(tag.text)):
+            dic[tag.text] += 1
+        else:
+            dic[tag.text] = 1
+    log_write("-----tags: " + wtags + "\n")
 
+def main():
+    log_text("prepare to login")
+    login()
+    log_text("prepare database")
+    conn = connect_database()
+    create_table(conn)
+    log_text("get user data")
+    sub_hrefs, user_data = spider_user("65b742a2000000000d03d4c5", conn)
+    dic = {}
+    for index, href in enumerate(sub_hrefs, start=1):
+        try:
+            get_post(index, href, dic)
+        except Exception as e:
+            log_text(e)
+            continue
+
+    # save key_words
+    msg = ""
+    for key in dic:
+        msg += key + ": " + str(dic[key]) + "; "
+    # conn, username, xhs_id, ip, intro, key_words
+    insert_data(conn, user_data[0], user_data[1], user_data[2], user_data[3], msg) # ! init a user
+
+    log_text("spider finished tags: ")
+    print(dic)
+    file.close()
+    conn.close()
 
 
 if __name__ == "__main__":
@@ -86,166 +243,8 @@ if __name__ == "__main__":
 
 driver.quit()
 
-# 循环添加所有 cookies
-# for cookie in cookies:
-#     driver.add_cookie(cookie)
-
-# 刷新页面以应用 cookie
-# driver.refresh()
-
-
-
-# # 注入 JavaScript，拦截 console.log 并存储日志
-# driver.execute_script("""
-#     (function() {
-#         const logs = [];
-#         const oldLog = console.log;
-#         console.log = function(...args) {
-#             // 将每个参数转换为 JSON 字符串
-#             const jsonArgs = args.map(arg => {
-#                 try {
-#                     return JSON.stringify(arg);
-#                 } catch (e) {
-#                     return String(arg);  // 如果不能转换，则转为字符串
-#                 }
-#             });
-#             logs.push(jsonArgs.join(' '));  // 将日志保存到数组中
-#             oldLog.apply(console, args);
-#         };
-#         window.getLogs = () => logs;  // 暴露一个函数来获取日志
-        
-#         // 将 rt 函数暴露到全局对象
-#         window.rt = function() {
-#             let t = "";
-#             for (let e = 0; e < 16; e++)
-#                 t += "abcdef0123456789".charAt(Math.floor(16 * Math.random()));
-#             return t;
-#         };
-#     })();
-# """)
-
-# 等待页面加载
-# time.sleep(0.5)
-
-# scroll_pause_time = 0.5  # 每次滚动后等待的时间
-# last_height = driver.execute_script("return document.body.scrollHeight")
-
-# while True:
-#     # 向下滚动
-#     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-#     # 等待页面加载
-#     time.sleep(scroll_pause_time)
-#     # 计算新的高度并与旧高度进行比较
-#     new_height = driver.execute_script("return document.body.scrollHeight")
-#     if new_height == last_height:
-#         break
-#     last_height = new_height
-
-
-# # 获取页面的所有内容
-# page_content = driver.page_source
-
-# # 打印或解析页面内容
-# # print(page_content)
-
-
-# with open("./save.txt", "w") as file:
-#     file.write(page_content)
-
-
-# import json
-# x_s_t = json.loads(logs[0])
-# X_s = x_s_t["X-s"]
-# X_t = str(x_s_t["X-t"])
-
-# print("X-s: ", x_s_t["X-s"])
-# print("X-t: ", x_s_t["X-t"])
-
-# print("X-b3-traceid: ", logs[1].strip('"'))
-
-# x8 = "I38rHdgsjopgIvesdVwgIC+oIELmBZ5e3VwXLgFTIxS3bqwErFeexd0ekncAzMFYnqthIhJeSBMDKutRI3KsYorWHPtGrbV0P9WfIi/eWc6eYqtyQApPI37ekmR1QL+5Ii6sdnoeSfqYHqwl2qt5B0DoIvMzOZQqZVw7IxOeTqwr4qtiIkrOIi/skccxICLdI3Oe0utl2ADZsLveDSKsSPw5IEvsiutJOqw8BVwfPpdeTDWOIx4VIiu6ZPwbPut5IvlaLbgs3qtxIxes1VwHIkumIkIyejgsY/WTgeAsjutKrZgedWI9gfKeYIHPI3ge0VtZIk3edqtAmzPjNgDHIxOekPtR/WOex0lyIhYsIE8+qoqjICuPqYGnIiciePt5ICZC4BNsDces6uw1IvKef9de00znIiAe1Mi7yuwuIiKeTf0sxz/e1Vt4ZdvsdutWIxiem9AsdqtEssKsWVw8IxI2I383sqwZgVtQa7zLwLOsD0OexutmIk6eYa/sxpI1IkosWL6sxfhuIk7e6utdIkqIQqwHtPtAI33e1qtWIkNs1VwDIEKsfqtltqwseqwlIvqAIxDc8nqiKWJeiqtIIEq8Ii7eSPw4bzmynjOsWUmdIiPyqPttZPwlIvAexVtjODAeVY5sVLzLIE0s6edsiqt8cPwrICJsWutfIEvsTgDPIkvs173sSPwXIC5e3PwDt9YaIhQgIvNs1p6e6gve0MgsdVtmIiPRI3SEoPtLIC8EIh6skbF3+A/eWutbIE82eut12zAsYzgeWPwboPwGIvZ4ICVyoI=="
-# o = X_t + '_' + X_s
-# i = X_t
-# c = X_t
-# l = X_s
-# h = x8
-
-# driver.execute_script(f"""
-#     console.log(encrypt_mcr(concat_default()(
-#         o = concat_default()(
-#             i = "".concat("{c}")
-#         ).call("{i}", "{l}")
-#     ).call("{o}", "{h}")));
-# """)
-# driver.execute_script(f"""
-#     console.log(encrypt_b64Encode);
-
-# """)
-
-# logs = driver.execute_script("return window.getLogs();")
-# print(logs[0])
+"""
+写到数据库里
+id(自增) username xhs_id intro ip key_words
 
 """
-{
-    "s0": 5, // 定值
-    "s1": "", // 定值
-    "x0": "1", // 定值
-    "x1": "3.6.8", // 定值
-    "x2": "Windows", // 定值
-    "x3": "xhs-pc-web", // 定值
-    "x4": "4.21.0", // 定值
-    "x5": "18ee0b8eaa14szquw6otb9amxbdj35n5nrhcpqi4j50000360507", // a1 的值 cookie里的a1
-    "x6": 1718762991893,  // x-t 的值
-    // x-s 的值
-    "x7":"XYW_eyJzaWduU3ZuIjoiNTEiLCJzaWduVHlwZSI6IngxIiwiYXBwSWQiOiJ4aHMtcGMtd2ViIiwic2lnblZlcnNpb24iOiIxIiwicGF5bG9hZCI6ImQ4M2I2NTY0OTY2ZGQzZDdmYzRlNzM0NTA5M2VlM2U1ZWRiZjc0NjcyMDExOTI5OGU0YjBjMzE1Zjg2MTI0ZDFhMTc4NGQ1NGY4MDc1NWY2NzQzODhlNGU5MGRkYTVkYmM5ZTNiZmRhMWZhYTFlYjkwZDc0YWEzMWI1NGM3MmNkMGQ3NGFhMzFiNTRjNzJjZGFjNDg5YjlkYThjZTVlNDhmNGFmYjlhY2ZjM2VhMjZmZTBiMjY2YTZiNGNjM2NiNTFiYzdiMDlhMTBjNjliZDQzYjgxNTY5ZWQ1ZWRmNjlhYWQ4OGU5MTRiZWY4ZjE3NTVjMzMwYjA2ZGI5YmY3YjAwM2EwZGIxMDhmMTk3OTgyM2I2OGUxNzE5MWRmM2NhZmUzN2YxM2RkZWVjZDJmMTk4YWFkYzBmNmE2MGFjNWVmNjkyODNhZTcwMGYyMWRmOTBkYWMyOTA5NjNlMTRkZWY4YTBlMTEzMjMwYzE3MWQ4NzE4ZGNlOTkwNTkzODkzMSJ9",
-    // 浏览器指纹，可以写死
-    "x8": "I38rHdgsjopgIvesdVwgIC+oIELmBZ5e3VwXLgFTIxS3bqwErFeexd0ekncAzMFYnqthIhJeSBMDKutRI3KsYorWHPtGrbV0P9WfIi/eWc6eYqtyQApPI37ekmR1QL+5Ii6sdnoeSfqYHqwl2qt5B0DoIvMzOZQqZVw7IxOeTqwr4qtiIkrOIi/skccxICLdI3Oe0utl2ADZsLveDSKsSPw5IEvsiutJOqw8BVwfPpdeTDWOIx4VIiu6ZPwbPut5IvlaLbgs3qtxIxes1VwHIkumIkIyejgsY/WTgeAsjutKrZgedWI9gfKeYIHPI3ge0VtZIk3edqtAmzPjNgDHIxOekPtR/WOex0lyIhYsIE8+qoqjICuPqYGnIiciePt5ICZC4BNsDces6uw1IvKef9de00znIiAe1Mi7yuwuIiKeTf0sxz/e1Vt4ZdvsdutWIxiem9AsdqtEssKsWVw8IxI2I383sqwZgVtQa7zLwLOsD0OexutmIk6eYa/sxpI1IkosWL6sxfhuIk7e6utdIkqIQqwHtPtAI33e1qtWIkNs1VwDIEKsfqtltqwseqwlIvqAIxDc8nqiKWJeiqtIIEq8Ii7eSPw4bzmynjOsWUmdIiPyqPttZPwlIvAexVtjODAeVY5sVLzLIE0s6edsiqt8cPwrICJsWutfIEvsTgDPIkvs173sSPwXIC5e3PwDt9YaIhQgIvNs1p6e6gve0MgsdVtmIiPRI3SEoPtLIC8EIh6skbF3+A/eWutbIE82eut12zAsYzgeWPwboPwGIvZ4ICVyoI==",
-    "x9": -1854331133,
-    // 请求次数，可以写死
-    "x10": 22
-}    
-
-
-"""
-
-# cookie = {
-#     "Cookie": "abRequestId=40d51d83-7f98-5f74-98fd-0e01ceded871",
-#     "webBuild": "4.38.0",
-#     "a1": "1928eb57f0bm53l600cu762cekf5krziooomxq4zb50000158734",
-#     "webId": "d494a83d86e22a87553fca13f0fc1e10", 
-#     "gid": "yjJYdD2Yi8ldyjJYdD2WilA48D62q1K88S7WluDKJSdTi6282TFu3C888y2YWq48y82jiYY0",
-#     "xsecappid": "xhs-pc-web", 
-#     "web_session": "040069b67a4223225d24785c3b354bf67fd409",
-#     "unread": "{%22ub%22:%2266f15cc9000000002c017847%22%2C%22ue%22:%2266f92673000000001b02014c%22%2C%22uc%22:33}",
-#     "acw_tc": "21d335e62cd7347d1750531027ed7a4e0211f742b01da185b662bbb1832c0988",
-#     "websectiga": "cffd9dcea65962b05ab048ac76962acee933d26157113bb213105a116241fa6c",
-#     "sec_poison_id": "3e57f46d-9e41-4022-b9b6-d9970765ce61",
-# }
-
-# driver.add_cookie(cookie)
-
-# driver.get("https://edith.xiaohongshu.com/api/sns/web/v1/user_posted?num=30&cursor=66e04343000000001e01b21c&user_id=66c2e6fc000000001d030738&image_formats=jpg,webp,avif")
-
-# title = driver.title
-
-# print(title)
-
-
-# 关闭浏览器
-
-# import requests
-
-# headers = {
-#     "X-b3-traceid": logs[1].strip('"'),
-#     "X-s": x_s_t["X-s"],
-#     "X-t": str(x_s_t["X-t"]),
-# }
-# url = "https://edith.xiaohongshu.com/api/sns/web/v1/user_posted?num=30&cursor=66e04343000000001e01b21c&user_id=66c2e6fc000000001d030738&image_formats=jpg,webp,avif"
-
-# resp = requests.get(url=url, headers = headers)
-
-# print(resp.text)
-# print(resp.request.headers)
-
-
-# driver.quit()
